@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+.venv/
+.conda/
+env/
+*.egg-info/
+build/
+dist/
+
+data/
+*.txt
+
+
+# scrape artifacts
+*.csv
+dump_*.html
+*.log
+acs_cache/
+gazetteer_*.csv
+
+# never commit an API key
+.env

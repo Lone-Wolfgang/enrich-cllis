@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clli-scraper"
+version = "0.1.0"
+description = "Scrape rate center and state data for CLLI codes from telcodata.us"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "requests>=2.31",
+    "beautifulsoup4>=4.12",
+    "lxml>=4.9",
+    "pandas>=2.0",
+    "tqdm>=4.66",
+    "rapidfuzz>=3.0",
+    "numpy>=1.24",
+]
+
+[project.scripts]
+clli-scrape = "clli_scraper.cli:main"
+
+[tool.setuptools]
+packages = ["clli_scraper"]
