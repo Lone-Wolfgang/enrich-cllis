@@ -224,8 +224,37 @@ def run_enrichment(args, log) -> int:
 
     if args.relational:
         from .relational import build_schema, summarize_schema, write_schema
+
+        # True county-level ACS: one row per county in every state present in
+        # the data. Built only when ACS ran, since it reuses those variables.
+        county_acs = None
+        if args.acs is not None:
+            from .acs import (attach_county_land_area, build_county_acs,
+                              resolve_variables)
+            try:
+                variables = resolve_variables(args.acs or None)
+                states = sorted(enriched["state"].dropna().unique().tolist())
+                log.info("Fetching true county ACS for %d state(s)", len(states))
+                county_acs = build_county_acs(
+                    states,
+                    variables=variables,
+                    year=args.acs_year,
+                    api_key=args.census_key,
+                    cache_dir=args.acs_cache,
+                )
+                if county_acs is not None and not county_acs.empty:
+                    try:
+                        cgaz = download_county_gazetteer(args.gazetteer_year)
+                        county_acs = attach_county_land_area(county_acs, cgaz)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("County land area unavailable (%s)", exc)
+                    log.info("County ACS: %d county row(s)", len(county_acs))
+            except (ValueError, RuntimeError) as exc:
+                log.error("County ACS failed: %s", exc)
+                county_acs = None
+
         rel_dir = args.relational_dir or dest.with_name(dest.stem + "_relational")
-        tables = build_schema(enriched)
+        tables = build_schema(enriched, county_acs=county_acs)
         written = write_schema(tables, rel_dir, prefix=args.relational_prefix)
         print()
         print(summarize_schema(tables))

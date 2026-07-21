@@ -245,11 +245,39 @@ def build_weather(df: pd.DataFrame, rep: pd.DataFrame) -> pd.DataFrame:
     return dated.reset_index(drop=True)
 
 
-def build_schema(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+COUNTY_KEY = ["state", "county"]
+
+
+def build_county(county_acs: pd.DataFrame) -> pd.DataFrame:
+    """County dimension table, keyed on (state, county).
+
+    Takes the already-fetched true county ACS frame (one row per county in the
+    states present in the data) and normalizes it: enforces the (state, county)
+    key, keeps county_geoid so the rate-center tables join on FIPS, and drops
+    any duplicate county rows defensively.
+    """
+    if county_acs is None or county_acs.empty:
+        return pd.DataFrame()
+    out = county_acs.copy()
+    for k in COUNTY_KEY:
+        if k not in out.columns:
+            raise ValueError(f"county ACS is missing key column {k!r}")
+    out = out[out["state"].notna() & out["county"].notna()]
+    out = out.drop_duplicates(subset=COUNTY_KEY, keep="first")
+    lead = _present(out, ["state", "county", "county_geoid", "acs_name"])
+    ordered = lead + [c for c in out.columns if c not in lead]
+    return out[ordered].reset_index(drop=True)
+
+
+def build_schema(df: pd.DataFrame,
+                 county_acs: pd.DataFrame | None = None) -> dict[str, pd.DataFrame]:
     """Split a wide enriched frame into the relational tables.
 
     Returns a dict of table_name -> DataFrame. Enrichment tables are included
     only when their columns are present, so this adapts to whichever layers ran.
+    When `county_acs` is supplied (true county-level ACS), an `enrich_county`
+    table keyed on (state, county) is added; it joins to the rate-center tables
+    through their shared `county_geoid`.
     """
     rep = choose_representatives(df)
 
@@ -264,6 +292,10 @@ def build_schema(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
         tables["enrich_soil"] = build_soil(df, rep)
     if _present(df, WEATHER_COLUMNS) or any(c.endswith("d_sum_mm") for c in df.columns):
         tables["enrich_weather"] = build_weather(df, rep)
+
+    county = build_county(county_acs) if county_acs is not None else pd.DataFrame()
+    if not county.empty:
+        tables["enrich_county"] = county
 
     return tables
 
@@ -285,12 +317,16 @@ def summarize_schema(tables: dict[str, pd.DataFrame]) -> str:
     """Report row counts and key-uniqueness for each table."""
     lines = ["relational schema:"]
     for name, tbl in tables.items():
-        keyed = all(k in tbl.columns for k in KEY)
+        # enrich_county is keyed on (state, county); everything else on
+        # (state, rate_center). Check each table against its own key.
+        tbl_key = COUNTY_KEY if name == "enrich_county" else KEY
+        keyed = all(k in tbl.columns for k in tbl_key)
         if keyed:
-            dupes = int(tbl.duplicated(subset=KEY).sum())
-            uniq = "unique key" if dupes == 0 else f"{dupes} dup key row(s)"
+            dupes = int(tbl.duplicated(subset=tbl_key).sum())
+            uniq = f"unique {tuple(tbl_key)} key" if dupes == 0 \
+                else f"{dupes} dup key row(s)"
         else:
-            uniq = "no (state,rate_center)"
+            uniq = f"no {tuple(tbl_key)}"
         lines.append(f"  {name:<18} {len(tbl):>7} row(s)   {uniq}")
 
     rc = tables.get("rate_center")
@@ -305,7 +341,16 @@ def summarize_schema(tables: dict[str, pd.DataFrame]) -> str:
             f"\n{len(cr)} CLLI(s) resolve to {centers} rate center(s); "
             f"{orphans} orphan key(s)."
         )
-    lines.append("\nAll tables join on (state, rate_center). Enrichment tables "
-                 "are one row per\ncenter; clli_resolution is one row per CLLI "
-                 "referencing its center.")
+
+    cty = tables.get("enrich_county")
+    if cty is not None and not cty.empty:
+        states = cty["state"].nunique() if "state" in cty.columns else 0
+        lines.append(
+            f"{len(cty)} county row(s) across {states} state(s), keyed on "
+            f"(state, county); join to rate_center on county_geoid."
+        )
+
+    lines.append("\nRate-center tables join on (state, rate_center); "
+                 "clli_resolution is one row\nper CLLI referencing its center. "
+                 "enrich_county is one row per county, joined\nvia county_geoid.")
     return "\n".join(lines)

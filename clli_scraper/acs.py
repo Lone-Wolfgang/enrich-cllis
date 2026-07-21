@@ -287,6 +287,112 @@ def add_moe_ratios(df: pd.DataFrame, variables: list[str]) -> pd.DataFrame:
     return out
 
 
+def build_county_acs(
+    states,
+    variables: list[str] | None = None,
+    year: int = DEFAULT_YEAR,
+    api_key: str | None = None,
+    cache_dir: Path | None = None,
+    derive_shares: bool = True,
+) -> pd.DataFrame:
+    """True county-level ACS for every county in the given states.
+
+    Unlike the per-place enrichment, this pulls the actual published county
+    figure straight from the Census county tier -- one wildcard call per state
+    fetches every county in it -- so the result is the real county number,
+    independent of how many rate centers were scraped there. It is the honest
+    denominator for a county-grain analysis.
+
+    Returns one row per county, keyed on (state, county) with the 5-digit
+    county FIPS retained as `county_geoid` so it joins cleanly to the
+    rate-center tables' own `county_geoid`. Column set mirrors the place-level
+    ACS: each variable plus its `_moe` and `_moe_ratio`, derived race shares,
+    and `land_area_sqkm` / `pop_density_sqkm` when a county gazetteer is joined
+    later.
+    """
+    variables = resolve_variables(variables)
+    states = sorted({str(s).upper() for s in states if s and str(s) != "nan"})
+    if not states:
+        log.warning("build_county_acs: no states to fetch")
+        return pd.DataFrame()
+
+    frames = []
+    for st in states:
+        f = fetch_acs(st, variables, year, "county", api_key, cache_dir)
+        if not f.empty:
+            f = f.copy()
+            f["state"] = st
+            frames.append(f)
+
+    if not frames:
+        log.warning("build_county_acs: no county ACS returned for %s", states)
+        return pd.DataFrame()
+
+    out = pd.concat(frames, ignore_index=True)
+
+    # (state, county) key: county name from the ACS NAME field, county_geoid
+    # from the 5-digit FIPS the county fetch already built into GEOID.
+    out = out.rename(columns={"GEOID": "county_geoid"})
+    out["county_geoid"] = out["county_geoid"].astype(str).str.zfill(5)
+    # ACS NAME is "<County>, <State>"; the leading segment is the county label.
+    if "acs_name" in out.columns:
+        out["county"] = out["acs_name"].astype(str).str.split(",").str[0].str.strip()
+    else:
+        out["county"] = None
+
+    # derived race shares, matching attach_acs
+    if derive_shares and "race_total" in out.columns:
+        total = pd.to_numeric(out["race_total"], errors="coerce")
+        for src, dst in (
+            ("race_white_nh", "pct_white_nh"),
+            ("race_black_nh", "pct_black_nh"),
+            ("race_asian_nh", "pct_asian_nh"),
+            ("race_hispanic", "pct_hispanic"),
+        ):
+            if src in out.columns:
+                out[dst] = (
+                    pd.to_numeric(out[src], errors="coerce") / total.where(total > 0) * 100
+                ).round(2)
+
+    out = add_moe_ratios(out, variables)
+
+    # lead with the key columns
+    lead = ["state", "county", "county_geoid", "acs_name"]
+    ordered = [c for c in lead if c in out.columns] + \
+              [c for c in out.columns if c not in lead]
+    return out[ordered].reset_index(drop=True)
+
+
+def attach_county_land_area(county_acs: pd.DataFrame,
+                            county_gaz: pd.DataFrame) -> pd.DataFrame:
+    """Add land area and population density to the county ACS frame.
+
+    Joins the county Gazetteer (already downloaded for the ACS county fallback)
+    on the 5-digit GEOID and derives `pop_density_sqkm` where population is
+    present, matching the place-level density column.
+    """
+    if county_acs.empty or county_gaz is None or county_gaz.empty:
+        return county_acs
+
+    gaz = county_gaz.copy()
+    cols = {c.lower(): c for c in gaz.columns}
+    geoid_c = cols.get("geoid")
+    aland_c = cols.get("aland")  # land area in square meters
+    if not geoid_c or not aland_c:
+        return county_acs
+
+    gz = pd.DataFrame({
+        "county_geoid": gaz[geoid_c].astype(str).str.zfill(5),
+        "land_area_sqkm": pd.to_numeric(gaz[aland_c], errors="coerce") / 1e6,
+    })
+    out = county_acs.merge(gz, on="county_geoid", how="left")
+    if "population" in out.columns:
+        pop = pd.to_numeric(out["population"], errors="coerce")
+        out["pop_density_sqkm"] = (pop / out["land_area_sqkm"].where(
+            out["land_area_sqkm"] > 0)).round(2)
+    return out
+
+
 def attach_acs(
     df: pd.DataFrame,
     variables: list[str] | None = None,

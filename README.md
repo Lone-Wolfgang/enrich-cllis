@@ -44,7 +44,9 @@ Enrichment runs in layers on top of the scraped CSV, each adding columns:
    from gNATSGO), PRISM precipitation normals, and optionally dated Daymet
    precipitation.
 4. **Relational split** — reshapes the wide enriched frame into separate tables
-   all joinable on `(state, rate_center)`.
+   all joinable on `(state, rate_center)`. When ACS ran, this also emits a
+   county-level table (`enrich_county`) with true county demographics, keyed on
+   `(state, county)`, for a coarser grain of analysis.
 
 Everything can run in a **single command**, or layer by layer. Both are shown
 below.
@@ -111,7 +113,11 @@ results_enriched_relational/
     enrich_gazetteer.csv                 # one row per center: geo + ACS
     enrich_soil.csv                      # one row per center: flood + soil
     enrich_weather.csv                   # one row per center: precip normals
+    enrich_county.csv                    # one row per county: true county ACS
 ```
+
+`enrich_county.csv` appears only when `--acs` ran, since it reuses those ACS
+variables at the county grain.
 
 `results_enriched.csv` is the flat frame if you want everything in one sheet.
 The `_relational/` directory is the keyed schema described in
@@ -167,12 +173,15 @@ only the failed work repeats.
 ## The relational schema
 
 `--relational` reshapes the wide frame into tables that behave like a small
-relational database. `(state, rate_center)` is the primary key.
+relational database. Most tables share the primary key `(state, rate_center)`;
+the county roll-up is keyed on `(state, county)` and joins in through
+`county_geoid`.
 
 ```
 rate_center        PK (state, rate_center)
                    One row per center: a representative lat/lon plus roll-up
                    counts (n_clli, rep_confidence, rep_resolution_method).
+                   Also carries county_geoid / county_name.
 
 clli_resolution    PK clli,  FK (state, rate_center) -> rate_center
                    One row per scraped CLLI: its resolution method, vote
@@ -187,12 +196,16 @@ enrich_soil        PK (state, rate_center)
 
 enrich_weather     PK (state, rate_center)   [see note on dated precip]
                    PRISM annual precipitation normals.
+
+enrich_county      PK (state, county)   [only when --acs ran]
+                   True county-level ACS for every county in the states you
+                   have data for. Joins to rate_center on county_geoid.
 ```
 
 Because each enrichment table has a **unique** key, joining any of them to the
 per-CLLI `clli_resolution` table is strictly many-to-one: a demographic or soil
 value attaches once per center and can never fan out across the several CLLIs
-that share it.
+that share it. The same holds for `enrich_county` joined on `county_geoid`.
 
 ### Representative row
 
@@ -221,6 +234,41 @@ model_df = (rc.merge(gz, on=KEY, how="left")
 
 Attach your cancellation-rate table on the same key and you have a place-level
 modelling frame.
+
+### County-level analysis
+
+For a coarser grain — consolidating the analysis to counties — use
+`enrich_county` instead. It carries the **true** county figure published by the
+Census (not an aggregate of the rate centers you scraped), for every county in
+the states your data covers. Two ways to use it:
+
+Analyze counties directly, one row per county:
+
+```python
+import pandas as pd
+
+cty = pd.read_csv("results_enriched_relational/enrich_county.csv",
+                  dtype={"county_geoid": str})
+# cty is already one row per (state, county) with population, poverty, etc.
+```
+
+Or attach the county figure to each rate center, to model city-level outcomes
+against county context:
+
+```python
+rc = pd.read_csv("results_enriched_relational/rate_center.csv",
+                 dtype={"county_geoid": str})
+cty = pd.read_csv("results_enriched_relational/enrich_county.csv",
+                  dtype={"county_geoid": str})
+
+# every rate center gets its county's demographics (many-to-one on FIPS)
+rc_with_county = rc.merge(cty, on="county_geoid", how="left")
+```
+
+`enrich_county` shares column names with `enrich_gazetteer` (both are ACS at
+different grains), so pick one grain per analysis rather than merging both onto
+the same frame. Read `county_geoid` as a string on load — leading zeros in the
+FIPS code matter.
 
 ### Custom output location
 
@@ -257,6 +305,13 @@ Each ACS estimate ships with its **margin of error** and a derived
 trusting a value. A `geo_level` column records whether each row's ACS data came
 from the place, county, or state tier — county and state are fallbacks used
 where place-level data is missing.
+
+> Two different "county" things, not to be confused: the **county fallback**
+> above substitutes county data into a *rate center's* row when its place-level
+> ACS is missing (still one row per center). The **`enrich_county` table** in
+> the relational output is separate — a standalone county dimension with the
+> true county figure for every county in your states. The fallback patches
+> gaps; the table is for county-grain analysis.
 
 Useful ACS options:
 - `--acs-year 2023` — ACS 5-year vintage (default 2023).

@@ -2,7 +2,8 @@
 
 __version__ = "0.1.0"
 
-from .acs import PRESETS, VARIABLES, attach_acs, summarize_acs
+from .acs import (PRESETS, VARIABLES, attach_acs, attach_county_land_area,
+                  build_county_acs, summarize_acs)
 from .enrich import download_gazetteer, enrich, expand_abbrev
 from .geo import (GNatsgoReader, attach_geo, load_job_dates,
                   query_soil_gnatsgo, summarize_geo)
@@ -13,6 +14,7 @@ __all__ = [
     "parse_html", "postprocess", "resolve_rate_center", "scrape",
     "enrich", "download_gazetteer", "expand_abbrev",
     "attach_acs", "summarize_acs", "VARIABLES", "PRESETS",
+    "build_county_acs", "attach_county_land_area",
     "attach_geo", "summarize_geo", "load_job_dates",
     "GNatsgoReader", "query_soil_gnatsgo",
     "build_schema", "write_schema", "summarize_schema",
