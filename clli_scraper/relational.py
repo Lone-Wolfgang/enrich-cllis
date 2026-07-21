@@ -255,14 +255,36 @@ def build_county(county_acs: pd.DataFrame) -> pd.DataFrame:
     states present in the data) and normalizes it: enforces the (state, county)
     key, keeps county_geoid so the rate-center tables join on FIPS, and drops
     any duplicate county rows defensively.
+
+    Rows are kept as long as they have a county_geoid (the FIPS is the real
+    join key); a missing or blank `county` label is backfilled from the FIPS so
+    a naming quirk can never silently empty the table.
     """
     if county_acs is None or county_acs.empty:
         return pd.DataFrame()
     out = county_acs.copy()
-    for k in COUNTY_KEY:
-        if k not in out.columns:
-            raise ValueError(f"county ACS is missing key column {k!r}")
-    out = out[out["state"].notna() & out["county"].notna()]
+
+    if "county_geoid" not in out.columns:
+        raise ValueError("county ACS is missing county_geoid; cannot key the "
+                         "county table")
+
+    # backfill a usable label from FIPS if county is absent/blank, so the key
+    # column is never all-null (which would drop every row below)
+    if "county" not in out.columns:
+        out["county"] = None
+    blank = out["county"].isna() | (out["county"].astype(str).str.strip() == "")
+    out.loc[blank, "county"] = "FIPS " + out.loc[blank, "county_geoid"].astype(str)
+
+    if "state" not in out.columns:
+        raise ValueError("county ACS is missing state; cannot key the county table")
+
+    before = len(out)
+    out = out[out["state"].notna() & out["county_geoid"].notna()]
+    if out.empty and before > 0:
+        log.warning("build_county: all %d county row(s) lacked a state or "
+                    "county_geoid; county table not written", before)
+        return pd.DataFrame()
+
     out = out.drop_duplicates(subset=COUNTY_KEY, keep="first")
     lead = _present(out, ["state", "county", "county_geoid", "acs_name"])
     ordered = lead + [c for c in out.columns if c not in lead]

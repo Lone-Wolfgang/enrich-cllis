@@ -335,10 +335,18 @@ def build_county_acs(
     out = out.rename(columns={"GEOID": "county_geoid"})
     out["county_geoid"] = out["county_geoid"].astype(str).str.zfill(5)
     # ACS NAME is "<County>, <State>"; the leading segment is the county label.
+    # Subject-only variable sets can arrive without acs_name (the NAME field
+    # rides on the detailed table), so fall back to the FIPS code rather than
+    # leaving the key column null -- an all-null county would otherwise get the
+    # whole table silently dropped downstream.
     if "acs_name" in out.columns:
-        out["county"] = out["acs_name"].astype(str).str.split(",").str[0].str.strip()
+        out["county"] = (out["acs_name"].astype(str)
+                         .str.split(",").str[0].str.strip())
     else:
         out["county"] = None
+    blank = out["county"].isna() | (out["county"].astype(str).str.strip() == "") \
+        | out["county"].astype(str).str.lower().isin(["none", "nan"])
+    out.loc[blank, "county"] = "FIPS " + out.loc[blank, "county_geoid"].astype(str)
 
     # derived race shares, matching attach_acs
     if derive_shares and "race_total" in out.columns:
