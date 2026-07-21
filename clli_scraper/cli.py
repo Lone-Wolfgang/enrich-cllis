@@ -93,6 +93,42 @@ def build_parser() -> argparse.ArgumentParser:
                    help="do not substitute county data where place data is missing")
     a.add_argument("--list-acs-vars", action="store_true",
                    help="print available ACS variables and presets, then exit")
+
+    gg = p.add_argument_group("geo covariates: flood / soil / precip (requires --enrich)")
+    gg.add_argument("--geo", action="store_true",
+                    help="attach FEMA flood zone, USDA water-table/drainage, and "
+                         "PRISM precipitation normals at each geocoded point")
+    gg.add_argument("--geo-cache", type=Path, default=None,
+                    help="directory for cached geo responses (default: geo_cache)")
+    gg.add_argument("--geo-dates", type=Path, default=None,
+                    help="CSV of state,rate_center,job_date to also attach dated "
+                         "Daymet precip (one output row per job date)")
+    gg.add_argument("--geo-lag", type=int, default=3,
+                    help="lag window in days for the dated precip rolling sum "
+                         "(default: 3)")
+    gg.add_argument("--soil-source", choices=["sda", "gnatsgo"], default="sda",
+                    help="soil backend: 'sda' queries USDA Soil Data Access over "
+                         "HTTP (no local files); 'gnatsgo' samples a local "
+                         "gNATSGO GeoPackage + raster, offline and faster, with "
+                         "extra flood/ponding fields (default: sda)")
+    gg.add_argument("--gnatsgo-gpkg", type=Path, default=None,
+                    help="path to the gNATSGO .gpkg (required for "
+                         "--soil-source gnatsgo)")
+    gg.add_argument("--gnatsgo-raster", type=Path, action="append", default=None,
+                    metavar="TIF",
+                    help="path to a gNATSGO muraster GeoTIFF; repeat to pass "
+                         "several tiles (CONUS, AK, HI, islands)")
+
+    r = p.add_argument_group("relational output (requires --enrich)")
+    r.add_argument("--relational", action="store_true",
+                   help="also emit a normalized schema keyed on "
+                        "(state, rate_center): rate_center, clli_resolution, and "
+                        "one table per enrichment layer, all joinable by the key")
+    r.add_argument("--relational-dir", type=Path, default=None,
+                   help="directory for the relational CSVs "
+                        "(default: <output stem>_relational/)")
+    r.add_argument("--relational-prefix", default="",
+                   help="filename prefix for the relational tables (default: none)")
     return p
 
 
@@ -157,9 +193,46 @@ def run_enrichment(args, log) -> int:
             log.error("ACS enrichment failed: %s", exc)
             return 2
 
+    if args.geo:
+        from .geo import attach_geo, load_job_dates, summarize_geo
+        try:
+            job_dates = None
+            if args.geo_dates:
+                if args.geo_dates.exists():
+                    job_dates = load_job_dates(args.geo_dates)
+                    log.info("Loaded job dates for %d rate center(s)", len(job_dates))
+                else:
+                    log.warning("Geo dates file not found: %s", args.geo_dates)
+            enriched = attach_geo(
+                enriched,
+                cache_dir=args.geo_cache,
+                job_dates=job_dates,
+                lag=args.geo_lag,
+                soil_source=args.soil_source,
+                gnatsgo_gpkg=args.gnatsgo_gpkg,
+                gnatsgo_rasters=args.gnatsgo_raster,
+            )
+            print()
+            print(summarize_geo(enriched))
+        except (ValueError, RuntimeError) as exc:
+            log.error("Geo enrichment failed: %s", exc)
+            return 2
+
     dest = args.enrich_out or src.with_name(src.stem + "_enriched.csv")
     enriched.to_csv(dest, index=False)
     log.info("Enriched -> %s", dest)
+
+    if args.relational:
+        from .relational import build_schema, summarize_schema, write_schema
+        rel_dir = args.relational_dir or dest.with_name(dest.stem + "_relational")
+        tables = build_schema(enriched)
+        written = write_schema(tables, rel_dir, prefix=args.relational_prefix)
+        print()
+        print(summarize_schema(tables))
+        for name, path in written.items():
+            log.info("  %s -> %s", name, path)
+        log.info("Relational schema -> %s", rel_dir)
+
     return 0
 
 
@@ -190,6 +263,19 @@ def main(argv=None) -> int:
 
     if args.acs is not None and not args.enrich:
         log.error("--acs requires --enrich (ACS joins on the GEOID it produces)")
+        return 2
+
+    if args.geo and not args.enrich:
+        log.error("--geo requires --enrich (it queries the lat/lon it produces)")
+        return 2
+
+    if args.soil_source == "gnatsgo" and (not args.gnatsgo_gpkg or not args.gnatsgo_raster):
+        log.error("--soil-source gnatsgo requires --gnatsgo-gpkg and at least one "
+                  "--gnatsgo-raster")
+        return 2
+
+    if args.relational and not args.enrich:
+        log.error("--relational requires --enrich (it splits the enriched frame)")
         return 2
 
     # --- reprocess mode: no network -------------------------------------
